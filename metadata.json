@@ -1,0 +1,6 @@
+{
+  "name": "Climoid - MSME Climate Credit Risk Console",
+  "description": "Institutional physical climate risk underwriting engine and portfolio stress-testing platform for bank and NBFC credit books.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
