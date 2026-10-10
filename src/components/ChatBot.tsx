@@ -7,6 +7,19 @@ import {
   PORTFOLIO_MSME_EXPANDED,
 } from '../data/mockData';
 import { loadGoogleMaps, bandPinSymbol } from '../lib/googleMaps';
+import { apiFetch, ApiAuthError, setToken } from '../lib/api';
+
+function escapeHtml(s: string): string {
+  const amp = String.fromCharCode(38);
+  const map: Record<string, string> = {
+    '&': amp + 'amp;',
+    '<': amp + 'lt;',
+    '>': amp + 'gt;',
+    '"': amp + 'quot;',
+    "'": amp + '#39;',
+  };
+  return s.replace(/[&<>"']/g, (c) => map[c]);
+}
 
 interface AssistantAction {
   label: string;
@@ -78,7 +91,7 @@ function ChatMiniMap({ points }: { points: ChatMapPoint[] }) {
         });
         marker.addListener('click', () => {
           info.setContent(
-            `<div style="font-size:12px;max-width:200px;line-height:1.5"><b>${p.name}</b><br>${p.verdict}</div>`
+            `<div style="font-size:12px;max-width:200px;line-height:1.5"><b>${escapeHtml(p.name)}</b><br>${escapeHtml(p.verdict)}</div>`
           );
           info.open({ map, anchor: marker });
         });
@@ -437,6 +450,11 @@ export function ChatBot({
   const [ttsEnabled, setTtsEnabled] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [lang, setLang] = useState('en');
+  const [locked, setLocked] = useState(false);
+  const [passcode, setPasscode] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const lastQueryRef = useRef<string | null>(null);
   const nextId = useRef(1);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -454,7 +472,7 @@ export function ChatBot({
 
   const speak = async (text: string) => {
     try {
-      const res = await fetch('/api/tts', {
+      const res = await apiFetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -490,7 +508,7 @@ export function ChatBot({
   const transcribe = async (blob: Blob) => {
     setTranscribing(true);
     try {
-      const res = await fetch('/api/transcribe', {
+      const res = await apiFetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': blob.type || 'audio/webm', 'x-language': lang },
         body: blob,
@@ -501,8 +519,13 @@ export function ChatBot({
       } else {
         send(data.text);
       }
-    } catch {
-      addAssistantMessage({ text: 'Voice error: could not reach the voice backend. Is `npm run server` running on :3001?' });
+    } catch (e) {
+      if (e instanceof ApiAuthError) {
+        setLocked(true);
+        addAssistantMessage({ text: '🔒 Console locked — unlock with the lender passcode, then speak again.' });
+      } else {
+        addAssistantMessage({ text: 'Voice error: could not reach the voice backend. Is `npm run server` running on :3001?' });
+      }
     } finally {
       setTranscribing(false);
     }
@@ -568,7 +591,7 @@ export function ChatBot({
     const controller = new AbortController();
     window.setTimeout(() => controller.abort(), 90000);
 
-    fetch('/api/chat', {
+    apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: history, lang }),
@@ -608,13 +631,52 @@ export function ChatBot({
         });
         setThinking(false);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        if (err instanceof ApiAuthError) {
+          lastQueryRef.current = text;
+          setLocked(true);
+          setThinking(false);
+          return;
+        }
         const reply = generateReply(text);
         window.setTimeout(() => {
           addAssistantMessage({ text: reply.text, action: reply.action });
           setThinking(false);
         }, 400);
       });
+  };
+
+  const unlock = async () => {
+    if (!passcode.trim() || authBusy) return;
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const res = await apiFetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passcode }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setAuthError(data.error || 'Invalid passcode.');
+        return;
+      }
+      const data = (await res.json()) as { token?: string };
+      if (!data.token) {
+        setAuthError('Login failed — no session token returned.');
+        return;
+      }
+      setToken(data.token);
+      setPasscode('');
+      setLocked(false);
+      const q = lastQueryRef.current;
+      lastQueryRef.current = null;
+      if (q) send(q);
+    } catch {
+      setAuthError('Login failed — is the voice/AI backend running on :3001?');
+    } finally {
+      setAuthBusy(false);
+    }
   };
 
   const runAction = (action: AssistantAction) => {
@@ -700,6 +762,39 @@ export function ChatBot({
 
           {/* Messages */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-3.5 py-3 flex flex-col gap-2.5 bg-[#f8f9ff]">
+            {locked && (
+              <div className="w-full bg-white border border-[#00685f]/30 rounded-2xl p-4 shadow-xs">
+                <div className="flex items-center gap-2 text-[#00685f] mb-1">
+                  <span className="material-symbols-outlined text-[18px]">lock</span>
+                  <span className="text-[13px] font-bold">Console locked</span>
+                </div>
+                <p className="text-[11.5px] text-[#565e74] mb-2.5">
+                  Enter the lender passcode to unlock the AI advisor and voice features.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={passcode}
+                    onChange={(e) => setPasscode(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void unlock();
+                    }}
+                    placeholder="Lender passcode"
+                    autoFocus
+                    className="flex-1 text-[13px] bg-[#f2f4f6] rounded-xl px-3.5 py-2.5 outline-none focus:ring-2 focus:ring-[#00685f]/30 text-[#0b1c30] placeholder:text-[#6d7a77]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void unlock()}
+                    disabled={authBusy || !passcode.trim()}
+                    className="px-4 rounded-xl bg-[#00685f] text-white text-[12.5px] font-semibold hover:bg-[#005a52] disabled:opacity-40 transition-colors"
+                  >
+                    {authBusy ? 'Verifying…' : 'Unlock'}
+                  </button>
+                </div>
+                {authError && <div className="text-[11px] text-[#e11d48] mt-1.5 font-medium">{authError}</div>}
+              </div>
+            )}
             {messages.map((m) => (
               <div key={m.id} className={`flex flex-col gap-1.5 ${m.role === 'user' ? 'items-end' : 'items-start'}`}>
                 <div
