@@ -1,6 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import * as L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 import { BorrowerRecord, RiskGrade, TabType } from '../types';
 import {
   PRIMARY_BORROWER,
@@ -8,6 +6,7 @@ import {
   INITIAL_ALERTS,
   PORTFOLIO_MSME_EXPANDED,
 } from '../data/mockData';
+import { loadGoogleMaps, bandPinSymbol } from '../lib/googleMaps';
 
 interface AssistantAction {
   label: string;
@@ -48,50 +47,67 @@ const BAND_COLORS: Record<RiskGrade, string> = {
   E: '#e11d48',
 };
 
-function makePinIcon(i: number) {
-  const c = PIN_COLORS[i % PIN_COLORS.length];
-  return L.divIcon({
-    className: '',
-    html: `<div style="width:26px;height:26px;border-radius:50% 50% 50% 4px;background:${c};color:#fff;display:flex;align-items:center;justify-content:center;font:700 12px/1 system-ui,sans-serif;box-shadow:0 2px 6px rgba(0,0,0,.35);border:2px solid #fff;">${i + 1}</div>`,
-    iconSize: [26, 26],
-    iconAnchor: [13, 26],
-    popupAnchor: [0, -24],
-  });
-}
-
 function ChatMiniMap({ points }: { points: ChatMapPoint[] }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current || points.length === 0) return;
-    const map = L.map(containerRef.current, {
-      zoomControl: true,
-      attributionControl: false,
-      scrollWheelZoom: false,
-    });
-    mapRef.current = map;
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+    let cancelled = false;
+    let map: google.maps.Map | undefined;
+    const markers: google.maps.Marker[] = [];
+    let polyline: google.maps.Polyline | undefined;
 
-    const latlngs: L.LatLng[] = [];
-    points.forEach((p, i) => {
-      latlngs.push(L.latLng(p.lat, p.lng));
-      L.marker([p.lat, p.lng], { icon: makePinIcon(i) })
-        .addTo(map)
-        .bindPopup(
-          `<div style="font-size:12px;max-width:200px"><b>${p.name}</b><br>${p.verdict}</div>`
-        );
+    loadGoogleMaps().then(() => {
+      if (cancelled || !containerRef.current || points.length === 0) return;
+      map = new google.maps.Map(containerRef.current, {
+        zoom: 4,
+        center: { lat: points[0].lat, lng: points[0].lng },
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+      });
+      const info = new google.maps.InfoWindow();
+      const bounds = new google.maps.LatLngBounds();
+      points.forEach((p, i) => {
+        const marker = new google.maps.Marker({
+          position: { lat: p.lat, lng: p.lng },
+          map,
+          icon: bandPinSymbol(PIN_COLORS[i % PIN_COLORS.length], true),
+          label: { text: String(i + 1), color: '#ffffff', fontSize: '11px', fontWeight: '700' },
+          title: p.name,
+        });
+        marker.addListener('click', () => {
+          info.setContent(
+            `<div style="font-size:12px;max-width:200px;line-height:1.5"><b>${p.name}</b><br>${p.verdict}</div>`
+          );
+          info.open({ map, anchor: marker });
+        });
+        markers.push(marker);
+        bounds.extend(marker.getPosition()!);
+      });
+      if (points.length > 1) {
+        polyline = new google.maps.Polyline({
+          path: points.map((p) => ({ lat: p.lat, lng: p.lng })),
+          strokeColor: '#00685f',
+          strokeOpacity: 0,
+          strokeWeight: 2,
+          icons: [
+            {
+              icon: { path: 'M 0,-1 0,1', strokeColor: '#00685f', strokeOpacity: 0.8, scale: 2.5 },
+              offset: '0',
+              repeat: '10px',
+            },
+          ],
+          map,
+        });
+      }
+      map.fitBounds(bounds, 32);
     });
-    if (points.length > 1) {
-      L.polyline(latlngs, { color: '#00685f', weight: 2, dashArray: '6 6', opacity: 0.7 }).addTo(map);
-    }
-    map.fitBounds(L.latLngBounds(latlngs).pad(0.35));
-    const t = window.setTimeout(() => map.invalidateSize(), 150);
 
     return () => {
-      window.clearTimeout(t);
-      map.remove();
-      mapRef.current = null;
+      cancelled = true;
+      markers.forEach((m) => m.setMap(null));
+      polyline?.setMap(null);
+      map = undefined;
     };
   }, [points]);
 

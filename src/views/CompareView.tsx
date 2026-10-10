@@ -1,6 +1,7 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { BorrowerRecord, RiskGrade } from '../types';
 import { PRIMARY_BORROWER, TOP_AT_RISK_BORROWERS } from '../data/mockData';
+import { loadGoogleMaps, bandPinSymbol } from '../lib/googleMaps';
 
 const ALL: BorrowerRecord[] = [PRIMARY_BORROWER, ...TOP_AT_RISK_BORROWERS];
 
@@ -204,9 +205,101 @@ const METRIC_GROUPS: { title: string; icon: string; rows: MetricRow[] }[] = [
   },
 ];
 
+function borrowerInfoHtml(b: BorrowerRecord, inComparison: boolean): string {
+  return `<div style="font-size:12px;line-height:1.55;max-width:240px">
+    <b style="font-size:12.5px">${b.name}</b><br/>
+    <span style="color:#565e74">${b.sector} • ${b.district}, ${b.state}</span><br/>
+    Base score ${b.baseCreditScore} → <b style="color:${BAND_COLORS[b.riskBand]}">${b.climateAdjustedScore}</b>
+    (−${b.climateDragPoints} pts)<br/>
+    PD ${b.basePdPercent}% → <b>${b.adjustedPdPercent}%</b> • Band <b style="color:${BAND_COLORS[b.riskBand]}">${b.riskBand}</b><br/>
+    <span style="color:#e11d48">₹${formatCr(b.revenueAtRiskCr)} Cr revenue at risk (${b.revenueAtRiskPercent}%)</span><br/>
+    <span style="color:${inComparison ? '#e11d48' : '#00685f'};font-weight:600">
+      ${inComparison ? 'Tap to remove from comparison' : 'Tap to add to comparison'}
+    </span>
+  </div>`;
+}
+
+function CompareIndiaMap({
+  selectedIds,
+  onToggle,
+}: {
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
+  const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const infoRef = useRef<google.maps.InfoWindow | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps().then(() => {
+      if (cancelled || !containerRef.current) return;
+      const map = new google.maps.Map(containerRef.current, {
+        center: { lat: 20.5, lng: 78.9 },
+        zoom: 5,
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+      });
+      infoRef.current = new google.maps.InfoWindow();
+      const bounds = new google.maps.LatLngBounds();
+      ALL.forEach((b) => {
+        const marker = new google.maps.Marker({
+          position: { lat: b.coordinates.lat, lng: b.coordinates.lng },
+          map,
+          icon: bandPinSymbol(BAND_COLORS[b.riskBand], selectedIds.includes(b.id)),
+          label: {
+            text: b.riskBand,
+            color: '#ffffff',
+            fontSize: '11px',
+            fontWeight: '700',
+          },
+          title: `${b.name} — score ${b.climateAdjustedScore}`,
+        });
+        marker.addListener('click', () => {
+          onToggle(b.id);
+          const info = infoRef.current;
+          if (info) {
+            info.setContent(borrowerInfoHtml(b, !selectedIds.includes(b.id)));
+            info.open({ map, anchor: marker });
+          }
+        });
+        markersRef.current.set(b.id, marker);
+        bounds.extend(marker.getPosition()!);
+      });
+      map.fitBounds(bounds, 48);
+      setReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    markersRef.current.forEach((marker, id) => {
+      const b = ALL.find((x) => x.id === id);
+      if (b) marker.setIcon(bandPinSymbol(BAND_COLORS[b.riskBand], selectedIds.includes(id)));
+    });
+  }, [ready, selectedIds]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="h-[420px] w-full rounded-2xl border border-[#bcc9c6]/40 bg-[#eef3f1]"
+    />
+  );
+}
+
 export function CompareView({ onOpenBorrower }: { onOpenBorrower: (b: BorrowerRecord) => void }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([ALL[0].id, ALL[1].id, ALL[2].id]);
   const [query, setQuery] = useState('');
+
+  const toggle = useCallback((id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }, []);
 
   const selected = useMemo(
     () => ALL.filter((b) => selectedIds.includes(b.id)),
@@ -264,10 +357,6 @@ export function CompareView({ onOpenBorrower }: { onOpenBorrower: (b: BorrowerRe
         b.district.toLowerCase().includes(q)
     );
   }, [query]);
-
-  const toggle = (id: string) => {
-    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
 
   const allGroups = useMemo(() => {
     const val = (b: BorrowerRecord, k: 'hazard' | 'vuln' | 'res') => idx.get(b.id)![k];
@@ -333,6 +422,29 @@ export function CompareView({ onOpenBorrower }: { onOpenBorrower: (b: BorrowerRe
           </button>
         </div>
       </div>
+
+      {/* ============ INDIA MAP ============ */}
+      <section className="bg-white border border-[#bcc9c6]/40 rounded-2xl p-4 shadow-xs">
+        <div className="flex items-center gap-2 mb-1 flex-wrap">
+          <span className="material-symbols-outlined text-[18px] text-[#00685f]">location_on</span>
+          <h2 className="text-[14px] font-bold text-[#0b1c30]">Where our MSMEs sit — India map</h2>
+          <span className="font-mono text-[10px] text-[#00685f] bg-[#89f5e7]/40 px-1.5 py-0.5 rounded font-semibold">
+            {ALL.length} BORROWERS
+          </span>
+          <span className="ml-auto font-mono text-[10.5px] text-[#565e74]">
+            filled pin = in comparison · faded pin = not selected · tap a pin to add/remove
+          </span>
+        </div>
+        <CompareIndiaMap selectedIds={selectedIds} onToggle={toggle} />
+        <div className="flex flex-wrap gap-x-4 gap-y-1 justify-center mt-2.5">
+          {(['A', 'B', 'C', 'D', 'E'] as RiskGrade[]).map((g) => (
+            <span key={g} className="flex items-center gap-1 font-mono text-[10px] text-[#565e74]">
+              <span className="w-2.5 h-2.5 rounded-full" style={{ background: BAND_COLORS[g] }} />
+              Band {g}
+            </span>
+          ))}
+        </div>
+      </section>
 
       <div className="grid grid-cols-[280px_1fr] gap-4 items-start">
         {/* ============ PICKER ============ */}

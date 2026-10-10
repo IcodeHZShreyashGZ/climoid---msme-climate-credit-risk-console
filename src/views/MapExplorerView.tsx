@@ -1,22 +1,133 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { HazardType, RiskGrade, BorrowerRecord } from '../types';
-import { PRIMARY_BORROWER } from '../data/mockData';
+import { PRIMARY_BORROWER, TOP_AT_RISK_BORROWERS } from '../data/mockData';
+import { loadGoogleMaps, bandPinSymbol } from '../lib/googleMaps';
+
+const ALL: BorrowerRecord[] = [PRIMARY_BORROWER, ...TOP_AT_RISK_BORROWERS];
+
+const BAND_COLORS: Record<RiskGrade, string> = {
+  A: '#10b981',
+  B: '#84cc16',
+  C: '#eab308',
+  D: '#f97316',
+  E: '#e11d48',
+};
+
+const HAZARD_STYLE: Record<
+  'flood' | 'heat' | 'drought' | 'storm',
+  { stroke: string; fill: string; radius: (b: BorrowerRecord) => number }
+> = {
+  flood: { stroke: '#006194', fill: '#007bb9', radius: (b) => 1800 + b.floodDepthModeledM * 2200 },
+  heat: { stroke: '#f59e0b', fill: '#f59e0b', radius: () => 3500 },
+  drought: { stroke: '#ea580c', fill: '#ea580c', radius: () => 6500 },
+  storm: { stroke: '#0d9488', fill: '#14b8a6', radius: () => 5200 },
+};
 
 interface MapExplorerViewProps {
   onOpenUnderwritingFile: (borrower: BorrowerRecord) => void;
   onExportDossier: () => void;
 }
 
+function ExplorerGoogleMap({
+  satelliteMode,
+  selectedHazard,
+  selectedBorrowerId,
+  onSelect,
+}: {
+  satelliteMode: 'satellite' | 'terrain';
+  selectedHazard: HazardType;
+  selectedBorrowerId: string;
+  onSelect: (b: BorrowerRecord) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const circlesRef = useRef<google.maps.Circle[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps().then(() => {
+      if (cancelled || !containerRef.current) return;
+      const map = new google.maps.Map(containerRef.current, {
+        center: { lat: 20.5, lng: 78.9 },
+        zoom: 5,
+        mapTypeControl: true,
+        mapTypeControlOptions: { mapTypeIds: ['roadmap', 'satellite', 'hybrid', 'terrain'] },
+        streetViewControl: false,
+        fullscreenControl: false,
+      });
+      mapRef.current = map;
+      const bounds = new google.maps.LatLngBounds();
+      ALL.forEach((b) => {
+        const marker = new google.maps.Marker({
+          position: { lat: b.coordinates.lat, lng: b.coordinates.lng },
+          map,
+          icon: bandPinSymbol(BAND_COLORS[b.riskBand], b.id === selectedBorrowerId),
+          label: { text: b.riskBand, color: '#ffffff', fontSize: '11px', fontWeight: '700' },
+          title: `${b.name} — score ${b.climateAdjustedScore}, Band ${b.riskBand}`,
+        });
+        marker.addListener('click', () => onSelect(b));
+        markersRef.current.set(b.id, marker);
+        bounds.extend(marker.getPosition()!);
+      });
+      map.fitBounds(bounds, 48);
+      setReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    mapRef.current.setMapTypeId(
+      satelliteMode === 'satellite' ? google.maps.MapTypeId.HYBRID : google.maps.MapTypeId.TERRAIN
+    );
+  }, [ready, satelliteMode]);
+
+  useEffect(() => {
+    if (!ready) return;
+    markersRef.current.forEach((marker, id) => {
+      const b = ALL.find((x) => x.id === id);
+      if (b) marker.setIcon(bandPinSymbol(BAND_COLORS[b.riskBand], id === selectedBorrowerId));
+    });
+  }, [ready, selectedBorrowerId]);
+
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    circlesRef.current.forEach((c) => c.setMap(null));
+    circlesRef.current = [];
+    const key = selectedHazard === 'satellite' ? 'flood' : selectedHazard;
+    const style = HAZARD_STYLE[key];
+    ALL.forEach((b) => {
+      const circle = new google.maps.Circle({
+        map: mapRef.current,
+        center: { lat: b.coordinates.lat, lng: b.coordinates.lng },
+        radius: style.radius(b),
+        strokeColor: style.stroke,
+        strokeOpacity: 0.75,
+        strokeWeight: 1.5,
+        fillColor: style.fill,
+        fillOpacity: 0.18,
+        clickable: false,
+      });
+      circlesRef.current.push(circle);
+    });
+  }, [ready, selectedHazard]);
+
+  return <div ref={containerRef} className="absolute inset-0 h-full w-full" />;
+}
+
 export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: MapExplorerViewProps) {
-  // Hazard layer selection
   const [selectedHazard, setSelectedHazard] = useState<HazardType>('flood');
   const [satelliteMode, setSatelliteMode] = useState<'satellite' | 'terrain'>('satellite');
-  const [forecastDay, setForecastDay] = useState<number>(2); // +2D Peak Flood
   const [isPlayingScrubber, setIsPlayingScrubber] = useState<boolean>(false);
 
   // Filter drawer states
   const [selectedState, setSelectedState] = useState('Maharashtra — Pune & Satara');
-  const [loanSizeRange, setLoanSizeRange] = useState<number>(1500); // 15 Cr max
+  const [loanSizeRange, setLoanSizeRange] = useState<number>(1500);
   const [sectors, setSectors] = useState({
     agro: true,
     textiles: true,
@@ -30,8 +141,12 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
   // Inspector drawer state
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [isWatchlisted, setIsWatchlisted] = useState(false);
-  const [zoomLevel, setZoomLevel] = useState(1);
-  const [activePin, setActivePin] = useState<'maa-gayatri' | 'sahyadri' | 'kisan' | 'baramati-cluster' | 'jejuri-cluster'>('maa-gayatri');
+  const [selectedBorrower, setSelectedBorrower] = useState<BorrowerRecord>(PRIMARY_BORROWER);
+
+  const handleSelectBorrower = useCallback((b: BorrowerRecord) => {
+    setSelectedBorrower(b);
+    setInspectorOpen(true);
+  }, []);
 
   const togglePlayback = () => {
     setIsPlayingScrubber(!isPlayingScrubber);
@@ -44,6 +159,16 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
     setSelectedRiskBand('D');
     setWaterProximity('< 500m to Major River/Basin');
   };
+
+  const b = selectedBorrower;
+  const totalExposure = ALL.reduce((s, x) => s + x.facilityAmountCr, 0);
+  const highHazardCount = ALL.filter((x) => x.riskBand === 'D' || x.riskBand === 'E').length;
+  const highHazardExposure = ALL.filter((x) => x.riskBand === 'D' || x.riskBand === 'E').reduce(
+    (s, x) => s + x.revenueAtRiskCr,
+    0
+  );
+  const modeledLgd = (28 + b.floodDepthModeledM * 9.5).toFixed(1);
+  const coordLabel = `${b.coordinates.lat.toFixed(2)}°N ${b.coordinates.lng.toFixed(2)}°E`;
 
   return (
     <div className="fixed top-14 left-64 right-0 bottom-0 overflow-hidden bg-[#f7f9fb] flex flex-col select-none">
@@ -164,25 +289,29 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
         <div className="flex items-center gap-5">
           <div className="flex items-center gap-2">
             <span className="w-1.5 h-1.5 rounded-full bg-[#00685f]"></span>
-            <span className="text-[#565e74] font-mono text-[11px]">BOUNDING BOX:</span>
-            <span className="font-mono text-[12px] font-medium text-[#0b1c30]">Pune-Baramati Industrial Belt [18.15°N, 74.57°E]</span>
+            <span className="text-[#565e74] font-mono text-[11px]">VIEWPORT:</span>
+            <span className="font-mono text-[12px] font-medium text-[#0b1c30]">
+              All-India portfolio — {ALL.length} tracked MSMEs
+            </span>
           </div>
           <div className="h-3 w-px bg-[#bcc9c6]/40"></div>
           <div className="flex items-center gap-1.5">
             <span className="text-[#565e74] font-mono text-[11px]">PORTFOLIO EXPOSURE:</span>
             <span className="font-mono text-[11px] bg-white border border-[#bcc9c6]/40 px-1.5 py-0.2 rounded font-medium text-[#0b1c30]">
-              142 MSMEs
+              {ALL.length} MSMEs
             </span>
             <span className="text-[#565e74]">|</span>
-            <span className="font-mono text-[12px] font-semibold text-[#0b1c30]">₹184.50 Cr</span>
+            <span className="font-mono text-[12px] font-semibold text-[#0b1c30]">₹{totalExposure.toFixed(1)} Cr</span>
             <span className="text-[#565e74] font-mono text-[11px]">Debt Outstanding</span>
           </div>
           <div className="h-3 w-px bg-[#bcc9c6]/40"></div>
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-[11px] text-rose-800 bg-rose-100 border border-rose-300 px-1.5 py-0.2 rounded font-semibold">
-              HIGH HAZARD: 29 Borrowers
+              HIGH HAZARD: {highHazardCount} Borrowers
             </span>
-            <span className="font-mono text-[12px] text-rose-700 font-semibold">(₹48.2 Cr At Risk)</span>
+            <span className="font-mono text-[12px] text-rose-700 font-semibold">
+              (₹{highHazardExposure.toFixed(1)} Cr At Risk)
+            </span>
           </div>
         </div>
 
@@ -194,167 +323,14 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
         </div>
       </div>
 
-      {/* ================= WORKBENCH BODY: MAP CANVAS + DRAWERS ================= */}
+      {/* ================= WORKBENCH BODY: GOOGLE MAP + DRAWERS ================= */}
       <div className="flex-1 relative overflow-hidden bg-[#eef3f1]">
-        {/* Cartographic Grid Lines */}
-        <svg className="absolute inset-0 w-full h-full opacity-40 pointer-events-none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <pattern id="map-grid" width="80" height="80" patternUnits="userSpaceOnUse">
-              <path d="M 80 0 L 0 0 0 80" fill="none" stroke="#cbd5e1" strokeDasharray="2,3" strokeWidth="0.75" />
-            </pattern>
-            <linearGradient id="floodGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#006194" stopOpacity="0.35" />
-              <stop offset="50%" stopColor="#007bb9" stopOpacity="0.22" />
-              <stop offset="100%" stopColor="#93ccff" stopOpacity="0.06" />
-            </linearGradient>
-            <linearGradient id="heatGrad" x1="100%" y1="0%" x2="0%" y2="100%">
-              <stop offset="0%" stopColor="#ba1a1a" stopOpacity="0.25" />
-              <stop offset="60%" stopColor="#f59e0b" stopOpacity="0.12" />
-              <stop offset="100%" stopColor="#fef08a" stopOpacity="0.0" />
-            </linearGradient>
-          </defs>
-          <rect width="100%" height="100%" fill="url(#map-grid)" />
-        </svg>
-
-        {/* Simulated Hydrographic Vector Layers */}
-        <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 1400 800" preserveAspectRatio="none">
-          {/* Karha River Drainage Basin */}
-          <path d="M-50,320 Q240,290 480,410 T920,440 T1450,380" fill="none" stroke="#93ccff" strokeWidth="26" opacity="0.6" strokeLinecap="round" />
-          <path d="M-50,320 Q240,290 480,410 T920,440 T1450,380" fill="none" stroke="#007bb9" strokeWidth="6" opacity="0.85" strokeLinecap="round" />
-
-          {/* 100-Year Fluvial Flood Inundation Envelope */}
-          <path d="M 320,340 C 440,310 590,360 670,430 C 740,490 820,530 920,490 C 860,560 710,580 580,520 C 460,460 380,420 320,340 Z" fill="url(#floodGrad)" stroke="#006194" strokeWidth="1.5" strokeDasharray="4,3" />
-
-          {/* Microclimate Heat Anomaly Contour */}
-          <circle cx="880" cy="260" r="180" fill="url(#heatGrad)" />
-          <circle cx="880" cy="260" r="120" fill="none" stroke="#f59e0b" strokeWidth="1" strokeDasharray="3,3" opacity="0.5" />
-
-          {/* Elevation Contours */}
-          <path d="M100,600 C 350,560 700,690 1200,610" fill="none" stroke="#bcc9c6" strokeWidth="1" strokeDasharray="4,4" opacity="0.5" />
-          <path d="M220,180 C 510,120 850,220 1350,150" fill="none" stroke="#bcc9c6" strokeWidth="1" strokeDasharray="4,4" opacity="0.5" />
-        </svg>
-
-        {/* Geospatial Annotations on Map */}
-        <div className="absolute left-[540px] top-[415px] pointer-events-none">
-          <span className="text-[10px] font-mono uppercase tracking-widest text-[#006194] font-semibold bg-white/85 px-1.5 py-0.5 rounded border border-[#006194]/20 shadow-2xs">
-            Karha River Floodway (100y Surge Contour)
-          </span>
-        </div>
-        <div className="absolute left-[780px] top-[140px] pointer-events-none">
-          <span className="text-[10px] font-mono uppercase tracking-widest text-amber-800 font-semibold bg-amber-50/90 px-1.5 py-0.5 rounded border border-amber-300 shadow-2xs">
-            Microclimate Hotspot: +3.2°C Baseline Deviation
-          </span>
-        </div>
-
-        {/* ================= CLUSTER & ASSET PINS ================= */}
-        {/* Cluster Pin 1: Baramati North */}
-        <div 
-          onClick={() => setActivePin('baramati-cluster')}
-          className="absolute left-[420px] top-[260px] cursor-pointer group"
-          title="Baramati Agro-Processing Cluster (34 units)"
-        >
-          <div className="relative flex items-center justify-center">
-            <span className="w-10 h-10 rounded-full bg-white shadow-sm border border-[#bcc9c6]/50 flex items-center justify-center group-hover:border-[#00685f] transition-all">
-              <span className="font-mono text-[13px] font-semibold text-[#0b1c30]">34</span>
-            </span>
-            <span className="absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full border-2 border-white"></span>
-          </div>
-          <span className="mt-1 block text-center font-mono text-[10px] text-[#565e74] bg-white/90 px-1 rounded border border-[#bcc9c6]/40">
-            Baramati North
-          </span>
-        </div>
-
-        {/* Cluster Pin 2: Jejuri MIDC */}
-        <div 
-          onClick={() => setActivePin('jejuri-cluster')}
-          className="absolute left-[340px] top-[470px] cursor-pointer group"
-          title="Jejuri MIDC Sector (48 units)"
-        >
-          <div className="relative flex items-center justify-center">
-            <span className="w-10 h-10 rounded-full bg-white shadow-sm border border-[#bcc9c6]/50 flex items-center justify-center group-hover:border-[#00685f] transition-all">
-              <span className="font-mono text-[13px] font-semibold text-[#0b1c30]">48</span>
-            </span>
-            <span className="absolute -top-1 -right-1 w-3 h-3 bg-[#00685f] rounded-full border-2 border-white"></span>
-          </div>
-          <span className="mt-1 block text-center font-mono text-[10px] text-[#565e74] bg-white/90 px-1 rounded border border-[#bcc9c6]/40">
-            Jejuri Industrial
-          </span>
-        </div>
-
-        {/* Single Pin: Resilient Pin (Sahyadri) */}
-        <div 
-          onClick={() => setActivePin('sahyadri')}
-          className="absolute left-[810px] top-[330px] cursor-pointer group"
-        >
-          <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 hover:border-[#00685f] px-2 py-1 rounded-lg shadow-sm">
-            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            <span className="text-[12px] font-medium text-[#0b1c30]">Sahyadri Polychem</span>
-            <span className="font-mono text-[10px] text-emerald-700 bg-emerald-50 px-1 rounded font-bold">A</span>
-          </div>
-        </div>
-
-        {/* Single Pin: Moderate Risk (Kisan Cold Storage) */}
-        <div 
-          onClick={() => setActivePin('kisan')}
-          className="absolute left-[590px] top-[240px] cursor-pointer group"
-        >
-          <div className="flex items-center gap-1.5 bg-white border border-[#bcc9c6]/50 hover:border-[#00685f] px-2 py-1 rounded-lg shadow-sm">
-            <span className="w-2 h-2 rounded-full bg-amber-500"></span>
-            <span className="text-[12px] font-medium text-[#0b1c30]">Kisan Cold Storage</span>
-            <span className="font-mono text-[10px] text-amber-700 bg-amber-50 px-1 rounded font-bold">C</span>
-          </div>
-        </div>
-
-        {/* SELECTED BORROWER PIN (PRIMARY FOCUS: Maa Gayatri Agro Cold Chain) */}
-        <div 
-          onClick={() => {
-            setActivePin('maa-gayatri');
-            setInspectorOpen(true);
-          }}
-          className="absolute left-[630px] top-[395px] z-10 cursor-pointer"
-        >
-          <div className="relative flex items-center justify-center">
-            <span className="absolute w-12 h-12 rounded-full bg-rose-500/25 gis-pulse"></span>
-            <span className="relative w-7 h-7 rounded-full bg-rose-600 text-white flex items-center justify-center shadow-md border-2 border-white">
-              <span className="material-symbols-outlined text-[16px]">priority_high</span>
-            </span>
-          </div>
-
-          {/* Floating Micro-Label */}
-          <div className="mt-1 -translate-x-1/2 left-1/2 absolute whitespace-nowrap bg-white border border-rose-400 px-2.5 py-1 rounded shadow-sm text-center">
-            <div className="font-mono text-[9px] font-bold text-rose-700 tracking-wider">SELECTED TARGET</div>
-            <div className="font-mono text-[12px] text-[#0b1c30] font-semibold">Maa Gayatri Agro</div>
-            <div className="font-mono text-[10px] text-rose-700">420m to Karha River | D Band</div>
-          </div>
-        </div>
-
-        {/* Map Floating Navigation Controls */}
-        <div className="absolute right-[430px] bottom-6 z-10 flex flex-col bg-white border border-[#bcc9c6]/40 rounded-lg shadow-sm overflow-hidden">
-          <button 
-            type="button"
-            onClick={() => setZoomLevel(Math.min(zoomLevel + 0.2, 2))}
-            className="p-2 text-[#565e74] hover:text-[#0b1c30] hover:bg-[#f2f4f6] transition-colors border-b border-[#bcc9c6]/30" 
-            title="Zoom In"
-          >
-            <span className="material-symbols-outlined text-[18px]">add</span>
-          </button>
-          <button 
-            type="button"
-            onClick={() => setZoomLevel(Math.max(zoomLevel - 0.2, 0.8))}
-            className="p-2 text-[#565e74] hover:text-[#0b1c30] hover:bg-[#f2f4f6] transition-colors border-b border-[#bcc9c6]/30" 
-            title="Zoom Out"
-          >
-            <span className="material-symbols-outlined text-[18px]">remove</span>
-          </button>
-          <button 
-            type="button"
-            onClick={() => setZoomLevel(1)}
-            className="p-2 text-[#565e74] hover:text-[#0b1c30] hover:bg-[#f2f4f6] transition-colors" 
-            title="Reset Orientation"
-          >
-            <span className="material-symbols-outlined text-[18px]">near_me</span>
-          </button>
-        </div>
+        <ExplorerGoogleMap
+          satelliteMode={satelliteMode}
+          selectedHazard={selectedHazard}
+          selectedBorrowerId={b.id}
+          onSelect={handleSelectBorrower}
+        />
 
         {/* ================= LEFT OVERLAY: SPATIAL QUERY FILTER DRAWER ================= */}
         {filterDrawerOpen ? (
@@ -366,8 +342,8 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                 <span className="text-[12px] font-semibold text-[#0b1c30] uppercase tracking-wide">Spatial Query Filter</span>
               </div>
               <div className="flex items-center gap-2">
-                <button 
-                  type="button" 
+                <button
+                  type="button"
                   onClick={handleResetFilter}
                   className="font-mono text-[11px] text-[#00685f] hover:underline"
                 >
@@ -388,8 +364,8 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
               {/* Geography */}
               <div>
                 <label className="block font-mono text-[10px] text-[#565e74] uppercase tracking-wider mb-1">State & District</label>
-                <select 
-                  value={selectedState} 
+                <select
+                  value={selectedState}
                   onChange={(e) => setSelectedState(e.target.value)}
                   className="w-full h-8 text-[12px] rounded-lg border border-[#bcc9c6]/50 bg-white px-2 text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]"
                 >
@@ -476,9 +452,10 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                         onClick={() => setSelectedRiskBand(band)}
                         className={`py-1 rounded font-mono text-[11px] font-bold transition-all ${
                           isSelected
-                            ? 'border-2 border-rose-600 bg-rose-100 text-rose-800 shadow-xs'
+                            ? 'border-2 text-white shadow-xs'
                             : 'border border-[#bcc9c6]/40 bg-[#f8f9ff] text-[#565e74] hover:bg-white'
                         }`}
+                        style={isSelected ? { background: BAND_COLORS[band], borderColor: BAND_COLORS[band] } : undefined}
                       >
                         {band}
                       </button>
@@ -486,7 +463,7 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                   })}
                 </div>
                 <span className="block text-[10px] text-[#565e74] mt-1 text-center font-mono">
-                  Band {selectedRiskBand} selected: High Inundation Hazard
+                  Band {selectedRiskBand} filter active on hazard layers
                 </span>
               </div>
 
@@ -498,8 +475,8 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                   onChange={(e) => setWaterProximity(e.target.value)}
                   className="w-full h-8 text-[12px] rounded-lg border border-[#bcc9c6]/50 bg-white px-2 text-[#0b1c30] focus:outline-none focus:ring-1 focus:ring-[#00685f]"
                 >
-                  <option>&lt; 500m to Major River/Basin</option>
-                  <option>&lt; 1000m to Waterbody</option>
+                  <option>{'<'} 500m to Major River/Basin</option>
+                  <option>{'<'} 1000m to Waterbody</option>
                   <option>Within 100y Coastal Surge Zone</option>
                   <option>All Topographic Zones</option>
                 </select>
@@ -509,7 +486,9 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
             {/* Match summary */}
             <div className="p-2.5 bg-[#f8f9ff] border-t border-[#bcc9c6]/30 flex items-center justify-between text-[11px]">
               <span className="font-mono text-[#565e74]">Filtered Match:</span>
-              <span className="font-mono font-semibold text-[#00685f]">29 Facilities (20.4%)</span>
+              <span className="font-mono font-semibold text-[#00685f]">
+                {ALL.filter((x) => x.riskBand === selectedRiskBand).length} of {ALL.length} tracked facilities
+              </span>
             </div>
           </aside>
         ) : (
@@ -530,13 +509,16 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
             <div className="p-3.5 border-b border-[#bcc9c6]/30 bg-[#f8f9ff] flex items-start justify-between">
               <div>
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-rose-800 bg-rose-100 px-1.5 py-0.2 rounded font-semibold border border-rose-200">
-                    Risk Band {PRIMARY_BORROWER.riskBand}
+                  <span
+                    className="font-mono text-[10px] uppercase tracking-wider text-white px-1.5 py-0.2 rounded font-semibold"
+                    style={{ background: BAND_COLORS[b.riskBand] }}
+                  >
+                    Risk Band {b.riskBand} • {b.riskCategory}
                   </span>
-                  <span className="font-mono text-[10px] text-[#565e74]">GSTIN: {PRIMARY_BORROWER.gstin}</span>
+                  <span className="font-mono text-[10px] text-[#565e74]">GSTIN: {b.gstin}</span>
                 </div>
                 <h2 className="text-[15px] font-semibold text-[#0b1c30] tracking-tight leading-snug">
-                  {PRIMARY_BORROWER.name}
+                  {b.name}
                 </h2>
               </div>
               <button
@@ -562,17 +544,19 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
 
                 <div className="relative h-36 w-full rounded-lg overflow-hidden border border-[#bcc9c6]/40 bg-[#eceef0]">
                   <img
-                    src={PRIMARY_BORROWER.satelliteImage}
-                    alt="Satellite view of Maa Gayatri Agro Cold Chain near Karha riverbank"
+                    src={b.satelliteImage}
+                    alt={`Satellite view of ${b.name} site`}
                     referrerPolicy="no-referrer"
                     className="w-full h-full object-cover"
                   />
                   <div className="absolute bottom-1.5 left-2 bg-white/90 px-1.5 py-0.5 rounded text-[10px] font-mono text-[#0b1c30] border border-[#bcc9c6]/40">
-                    18°18'22"N 74°34'11"E
+                    {coordLabel}
                   </div>
-                  <div className="absolute top-1.5 right-2 bg-rose-600 text-white px-1.5 py-0.5 rounded font-mono text-[10px] font-bold shadow-xs">
-                    Buffer Breach
-                  </div>
+                  {b.riverBufferDistanceM < 500 && (
+                    <div className="absolute top-1.5 right-2 bg-rose-600 text-white px-1.5 py-0.5 rounded font-mono text-[10px] font-bold shadow-xs">
+                      Buffer Breach
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -582,38 +566,43 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                 <div className="p-2.5 rounded-lg border border-[#bcc9c6]/30 bg-[#f8f9ff]">
                   <span className="block font-mono text-[10px] text-[#565e74] uppercase">River Buffer Distance</span>
                   <div className="flex items-baseline gap-1 mt-1">
-                    <span className="font-mono text-[18px] font-bold text-rose-700">{PRIMARY_BORROWER.riverBufferDistanceM}m</span>
-                    <span className="font-mono text-[10px] text-[#565e74]">to Karha River</span>
+                    <span className={`font-mono text-[18px] font-bold ${b.riverBufferDistanceM < 500 ? 'text-rose-700' : 'text-[#0b1c30]'}`}>
+                      {b.riverBufferDistanceM}m
+                    </span>
                   </div>
-                  <span className="text-[10px] text-rose-700 font-medium block mt-0.5">&lt; 500m Fluvial Hazard Zone</span>
+                  <span className="text-[10px] text-[#565e74] font-medium block mt-0.5">to {b.waterbodyName}</span>
                 </div>
 
                 {/* Micro-Elevation */}
                 <div className="p-2.5 rounded-lg border border-[#bcc9c6]/30 bg-[#f8f9ff]">
                   <span className="block font-mono text-[10px] text-[#565e74] uppercase">Micro-Elevation (DEM)</span>
                   <div className="flex items-baseline gap-1 mt-1">
-                    <span className="font-mono text-[18px] font-bold text-[#0b1c30]">{PRIMARY_BORROWER.elevationMsl} m</span>
+                    <span className="font-mono text-[18px] font-bold text-[#0b1c30]">{b.elevationMsl} m</span>
                     <span className="font-mono text-[10px] text-[#565e74]">MSL</span>
                   </div>
-                  <span className="text-[10px] text-[#565e74] font-medium block mt-0.5">-2.8m below 100y floodline</span>
+                  <span className="text-[10px] text-[#565e74] font-medium block mt-0.5">vs 100y floodline</span>
                 </div>
 
                 {/* Debt Exposure */}
                 <div className="p-2.5 rounded-lg border border-[#bcc9c6]/30 bg-[#f8f9ff]">
                   <span className="block font-mono text-[10px] text-[#565e74] uppercase">Debt Outstanding</span>
                   <div className="flex items-baseline gap-1 mt-1">
-                    <span className="font-mono text-[18px] font-bold text-[#0b1c30]">₹7.45 Cr</span>
+                    <span className="font-mono text-[18px] font-bold text-[#0b1c30]">₹{b.facilityAmountCr.toFixed(2)} Cr</span>
                   </div>
-                  <span className="text-[10px] text-[#565e74] font-medium block mt-0.5">Term Loan (SME-Agridiv)</span>
+                  <span className="text-[10px] text-[#565e74] font-medium block mt-0.5">
+                    {b.facilityType} · {b.tenorMonths}mo tenor
+                  </span>
                 </div>
 
                 {/* Modeled Loss Given Surge */}
                 <div className="p-2.5 rounded-lg border border-[#bcc9c6]/30 bg-[#f8f9ff]">
                   <span className="block font-mono text-[10px] text-[#565e74] uppercase">Modeled Loss Given Surge</span>
                   <div className="flex items-baseline gap-1 mt-1">
-                    <span className="font-mono text-[18px] font-bold text-rose-700">41.8%</span>
+                    <span className="font-mono text-[18px] font-bold text-rose-700">{modeledLgd}%</span>
                   </div>
-                  <span className="text-[10px] text-rose-700 font-medium block mt-0.5">+184 bps spread required</span>
+                  <span className="text-[10px] text-rose-700 font-medium block mt-0.5">
+                    +{b.recommendedSpreadAdjustmentBps} bps spread required
+                  </span>
                 </div>
               </div>
 
@@ -623,23 +612,31 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                 <div className="space-y-1.5">
                   <div className="flex justify-between items-center">
                     <span className="text-[#565e74] font-mono text-[11px]">Inundation Depth (T+48h)</span>
-                    <span className="font-mono text-[12px] text-rose-700 font-semibold">1.45 meters</span>
+                    <span className="font-mono text-[12px] text-rose-700 font-semibold">{b.floodDepthModeledM} meters</span>
                   </div>
                   <div className="w-full bg-[#eceef0] h-1.5 rounded-full overflow-hidden">
-                    <div className="bg-rose-600 h-full rounded-full w-3/4"></div>
+                    <div
+                      className="bg-rose-600 h-full rounded-full"
+                      style={{ width: `${Math.min(100, (b.floodDepthModeledM / 2) * 100)}%` }}
+                    ></div>
                   </div>
 
                   <div className="flex justify-between items-center pt-1">
                     <span className="text-[#565e74] font-mono text-[11px]">Supply Chain Road Inaccessibility</span>
-                    <span className="font-mono text-[12px] text-amber-700 font-semibold">4.5 Days</span>
+                    <span className="font-mono text-[12px] text-amber-700 font-semibold">{b.supplyRouteDowntimeDays} Days</span>
                   </div>
                   <div className="w-full bg-[#eceef0] h-1.5 rounded-full overflow-hidden">
-                    <div className="bg-amber-500 h-full rounded-full w-1/2"></div>
+                    <div
+                      className="bg-amber-500 h-full rounded-full"
+                      style={{ width: `${Math.min(100, (b.supplyRouteDowntimeDays / 10) * 100)}%` }}
+                    ></div>
                   </div>
 
                   <div className="flex justify-between items-center pt-1 text-[11px]">
-                    <span className="text-[#565e74] font-mono">Structural Defense Bund</span>
-                    <span className="font-mono text-[#565e74] font-medium">None / Unprotected</span>
+                    <span className="text-[#565e74] font-mono">Climate Score Impact</span>
+                    <span className="font-mono text-rose-700 font-medium">
+                      {b.baseCreditScore} → {b.climateAdjustedScore} (−{b.climateDragPoints} pts)
+                    </span>
                   </div>
                 </div>
               </div>
@@ -651,7 +648,8 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
                   <span className="font-mono text-[10px] font-semibold uppercase">Underwriter Policy Recommendation</span>
                 </div>
                 <p className="text-[12px] text-[#0b1c30] leading-relaxed">
-                  Require borrower to install 1.8m perimeter flood deflectors or mandate secondary parametric flood insurance rider before FY26 credit renewal.
+                  {b.recommendedCovenants[0] ||
+                    'Require perimeter flood defences or parametric flood insurance before the next credit renewal cycle.'}
                 </p>
               </div>
             </div>
@@ -660,7 +658,7 @@ export function MapExplorerView({ onOpenUnderwritingFile, onExportDossier }: Map
             <div className="p-3.5 bg-[#f8f9ff] border-t border-[#bcc9c6]/30 flex flex-col gap-2">
               <button
                 type="button"
-                onClick={() => onOpenUnderwritingFile(PRIMARY_BORROWER)}
+                onClick={() => onOpenUnderwritingFile(b)}
                 className="w-full h-9 rounded-lg bg-[#00685f] hover:bg-[#008378] text-white font-medium text-[12px] flex items-center justify-center gap-2 transition-colors shadow-xs active:scale-98"
               >
                 <span className="material-symbols-outlined text-[16px]">launch</span>

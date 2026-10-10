@@ -545,6 +545,8 @@ python ingest/open_meteo.py --daily
 uvicorn api.main:app --reload
 ```
 
+**Windows one-click:** double-click `start-climoid.bat` — installs dependencies on first run, starts the voice + AI backend (`:3001`) and the console (`:3000`), and opens your browser.
+
 Example request:
 
 ```http
