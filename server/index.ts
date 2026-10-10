@@ -1,5 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
+import { spawn } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
   PRIMARY_BORROWER,
   TOP_AT_RISK_BORROWERS,
@@ -10,6 +13,17 @@ import { BorrowerRecord } from '../src/types';
 
 const app = express();
 const PORT = 3001;
+
+const REPORTS_DIR = path.join(process.cwd(), 'reports');
+fs.mkdirSync(REPORTS_DIR, { recursive: true });
+
+const BAND_COLORS: Record<string, string> = {
+  A: '#10b981',
+  B: '#84cc16',
+  C: '#eab308',
+  D: '#f97316',
+  E: '#e11d48',
+};
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_BASE = 'https://api.groq.com/openai/v1';
@@ -49,8 +63,8 @@ interface ChatMessage {
 
 const ALL_BORROWERS: BorrowerRecord[] = [PRIMARY_BORROWER, ...TOP_AT_RISK_BORROWERS];
 
-function compactBorrowers() {
-  return ALL_BORROWERS.map((b) => ({
+function compactBorrower(b: BorrowerRecord) {
+  return {
     msmeId: b.msmeId,
     name: b.name,
     sector: b.sector,
@@ -79,7 +93,11 @@ function compactBorrowers() {
     supplyDowntimeDays: b.supplyRouteDowntimeDays,
     spreadAdjustmentBps: b.recommendedSpreadAdjustmentBps,
     covenants: b.recommendedCovenants,
-  }));
+  };
+}
+
+function compactBorrowers() {
+  return ALL_BORROWERS.map(compactBorrower);
 }
 
 function buildSystemPrompt(lang?: string): string {
@@ -131,7 +149,11 @@ Provide 2–4 points with representative coordinates and an exact JSON array.
 3. Console navigation — optionally append a shortcut:
 [[NAV: <tab> | optional-msmeId | optional-button-label]]
 Valid tabs: dashboard, map, borrowers, compare, alerts, scenarios, portfolio, reports, settings. Use msmeId only for the borrowers tab.
-You may combine SCORE + NAV for a borrower answer. Never use these markers anywhere except these final directive lines.
+4. PDF report — MANDATORY whenever the user asks for a report, dossier, PDF or downloadable document ("build/generate/create a report", "make a PDF", "prepare a committee dossier", "labeled map report"). If you do not include a valid [[REPORT: {...}]] directive, the PDF is never generated and the feature breaks. The directive format:
+[[REPORT: {"title": "<report title>", "subtitle": "<short subtitle>", "narrative": "<the full committee-ready analysis>", "borrowerMsmeIds": ["<exact msmeIds from the data>"], "regionPoints": [{"lat": <num>, "lng": <num>, "name": "<region name>", "verdict": "<one-line verdict>"}]}]]
+For a portfolio-wide report use "borrowerMsmeIds": ["ALL"]. Include regionPoints ONLY for geographic/comparison reports (e.g. UP vs AP lending); omit otherwise. The system then renders a labeled GeoPandas India map and a multi-page PDF automatically.
+IMPORTANT: in your VISIBLE reply, never print report JSON or coordinate lists — the user sees only your summary analysis plus a "the PDF report is ready" line; all points, labels and narrative belong inside the [[REPORT: ...]] directive itself.
+You may combine directives (e.g. REPORT + MAP for a comparison, SCORE + NAV for a borrower). Never use these markers anywhere except these final directive lines.
 
 ## Beyond the live data — geographic & sector advisory (IMPORTANT)
 When asked about markets, sectors or states NOT yet tracked in the console (e.g. "Should we lend into the rice market in UP or Andhra Pradesh?"):
@@ -163,6 +185,17 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.get('/api/reports/:id', (req, res) => {
+  const id = String(req.params.id).replace(/[^a-zA-Z0-9_-]/g, '');
+  const filePath = path.join(REPORTS_DIR, `${id}.pdf`);
+  if (!id || !fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Report not found.' });
+  }
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `inline; filename="climoid-${id}.pdf"`);
+  fs.createReadStream(filePath).pipe(res);
+});
+
 interface MapPoint {
   lat: number;
   lng: number;
@@ -170,13 +203,33 @@ interface MapPoint {
   verdict: string;
 }
 
+interface ReportRequest {
+  title?: string;
+  subtitle?: string;
+  narrative?: string;
+  borrowerMsmeIds?: string[];
+  regionPoints?: { lat: number; lng: number; name: string; verdict?: string }[];
+}
+
 function parseDirectives(raw: string): {
   text: string;
   action?: { tab: string; msmeId?: string; label?: string };
   map?: MapPoint[];
   scoreMsmeId?: string;
+  report?: ReportRequest;
 } {
   let text = raw;
+
+  let report: ReportRequest | undefined;
+  const reportMatch = text.match(/\[\[REPORT:\s*(\{[\s\S]*?\})\s*\]\]/);
+  if (reportMatch) {
+    try {
+      report = JSON.parse(reportMatch[1]) as ReportRequest;
+    } catch {
+      report = undefined;
+    }
+    text = text.replace(reportMatch[0], '');
+  }
 
   let map: MapPoint[] | undefined;
   const mapMatch = text.match(/\[\[MAP:\s*(\[[\s\S]*?\])\s*\]\]/);
@@ -216,7 +269,42 @@ function parseDirectives(raw: string): {
     }
   }
 
-  return { text: text.trim(), action, map, scoreMsmeId };
+  return { text: text.trim(), action, map, scoreMsmeId, report };
+}
+
+function generateReport(payload: Record<string, unknown>): Promise<{ filename?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const py = spawn('python', ['python/report_gen.py'], { cwd: process.cwd() });
+    let out = '';
+    let err = '';
+    py.stdout.on('data', (d: Buffer) => {
+      out += d.toString();
+    });
+    py.stderr.on('data', (d: Buffer) => {
+      err += d.toString();
+    });
+    const killTimer = setTimeout(() => {
+      py.kill();
+      resolve({ error: 'Report generation timed out (90s).' });
+    }, 90000);
+    py.on('close', (code) => {
+      clearTimeout(killTimer);
+      if (code === 0) {
+        try {
+          const lines = out.trim().split('\n');
+          const result = JSON.parse(lines[lines.length - 1]) as { ok?: boolean; filename?: string; error?: string };
+          if (result.ok && result.filename) resolve({ filename: result.filename });
+          else resolve({ error: result.error || 'Report generation failed.' });
+        } catch {
+          resolve({ error: 'Report generator returned invalid output: ' + (out || err).slice(0, 300) });
+        }
+      } else {
+        resolve({ error: 'Report generation failed: ' + (err || `exit code ${code}`).slice(0, 300) });
+      }
+    });
+    py.stdin.write(JSON.stringify(payload));
+    py.stdin.end();
+  });
 }
 
 app.post('/api/chat', async (req, res) => {
@@ -245,7 +333,7 @@ app.post('/api/chat', async (req, res) => {
     const payload: Record<string, unknown> = {
       model: provider.model,
       temperature: 0.3,
-      max_tokens: 1024,
+      max_tokens: 2048,
       messages: [{ role: 'system', content: buildSystemPrompt(lang) }, ...history.slice(-16)],
     };
     if (provider.model.includes('gpt-oss')) payload.reasoning_effort = 'low';
@@ -272,13 +360,95 @@ app.post('/api/chat', async (req, res) => {
         continue;
       }
       const parsed = parseDirectives(raw);
+
+      if (!parsed.report) {
+        const lastUser = [...history].reverse().find((m) => m.role === 'user')?.content?.toLowerCase() || '';
+        if (/\b(report|dossier|pdf)\b/.test(lastUser)) {
+          parsed.report = parsed.map && parsed.map.length >= 2
+            ? {
+                title: 'Climoid Region Comparison Report',
+                subtitle: 'Climate-credit advisory with labeled map',
+                narrative: parsed.text.slice(0, 1500),
+                regionPoints: parsed.map,
+              }
+            : {
+                title: 'Climoid Portfolio Climate Risk Report',
+                subtitle: 'All tracked borrowers',
+                narrative: parsed.text.slice(0, 1500),
+                borrowerMsmeIds: ['ALL'],
+              };
+        }
+      }
+
       const msmeId = parsed.action?.msmeId?.toUpperCase();
       const borrower = msmeId ? ALL_BORROWERS.find((b) => b.msmeId.toUpperCase() === msmeId) : undefined;
       const scoreBorrower = parsed.scoreMsmeId
         ? ALL_BORROWERS.find((b) => b.msmeId.toUpperCase() === parsed.scoreMsmeId)
         : undefined;
+
+      let responseText = parsed.text;
+      let reportInfo: { url: string; filename: string } | undefined;
+
+      if (parsed.report) {
+        const req = parsed.report;
+        const includeIds = (req.borrowerMsmeIds || []).map((s) => s.trim().toUpperCase());
+        const reportBorrowers =
+          includeIds.includes('ALL') || includeIds.length === 0
+            ? ALL_BORROWERS
+            : ALL_BORROWERS.filter((b) => includeIds.includes(b.msmeId.toUpperCase()));
+
+        const reportId = `rpt-${Date.now().toString(36)}${Math.floor(Math.random() * 10000).toString(36)}`;
+        const points: Record<string, unknown>[] = reportBorrowers.map((b) => ({
+          lat: b.coordinates.lat,
+          lng: b.coordinates.lng,
+          name: b.name,
+          label: `${b.name} — ${b.climateAdjustedScore} (Band ${b.riskBand}, PD ${b.adjustedPdPercent}%)`,
+          color: BAND_COLORS[b.riskBand] || '#00685f',
+          kind: 'borrower',
+          band: b.riskBand,
+        }));
+        (req.regionPoints || []).forEach((rp) => {
+          if (typeof rp.lat !== 'number' || typeof rp.lng !== 'number') return;
+          points.push({
+            lat: rp.lat,
+            lng: rp.lng,
+            name: String(rp.name || 'Region').slice(0, 60),
+            verdict: String(rp.verdict || '').slice(0, 200),
+            label: `${String(rp.name || 'Region').slice(0, 30)}: ${String(rp.verdict || '').slice(0, 48)}`,
+            color: '#2563eb',
+            kind: 'region',
+          });
+        });
+
+        const totalFacility = reportBorrowers.reduce((s, b) => s + b.facilityAmountCr, 0);
+        const totalRevRisk = reportBorrowers.reduce((s, b) => s + b.revenueAtRiskCr, 0);
+        const highHazard = reportBorrowers.filter((b) => b.riskBand === 'D' || b.riskBand === 'E').length;
+
+        const gen = await generateReport({
+          reportId,
+          title: req.title || 'Climoid Report',
+          subtitle: req.subtitle || '',
+          narrative: req.narrative || parsed.text.slice(0, 1500),
+          points,
+          borrowers: reportBorrowers.map(compactBorrower),
+          stats: [
+            `${reportBorrowers.length} MSMEs included`,
+            `₹${totalFacility.toFixed(1)} Cr exposure`,
+            `${highHazard} in bands D/E`,
+            `₹${totalRevRisk.toFixed(1)} Cr revenue at risk`,
+          ],
+          generatedAt: new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC',
+        });
+
+        if (gen.filename) {
+          reportInfo = { url: `/api/reports/${reportId}`, filename: gen.filename };
+        } else {
+          responseText += `\n\n⚠ Report generation failed: ${gen.error || 'unknown error'}`;
+        }
+      }
+
       return res.json({
-        text: parsed.text,
+        text: responseText,
         action: parsed.action
           ? {
               tab: parsed.action.tab,
@@ -288,6 +458,7 @@ app.post('/api/chat', async (req, res) => {
           : undefined,
         map: parsed.map,
         scoreMsmeId: scoreBorrower?.msmeId,
+        report: reportInfo,
       });
     } catch (e) {
       lastError = `${provider.model}: ${e instanceof Error ? e.message : 'request failed'}`;

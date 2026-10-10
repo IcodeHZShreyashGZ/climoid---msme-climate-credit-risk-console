@@ -1,0 +1,5 @@
+geopandas>=1.0
+shapely>=2.0
+adjustText>=1.0
+matplotlib>=3.8
+reportlab>=4.0

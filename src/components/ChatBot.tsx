@@ -28,6 +28,7 @@ interface Message {
   action?: AssistantAction;
   map?: ChatMapPoint[];
   scoreMsmeId?: string;
+  report?: { url: string; filename: string };
 }
 
 interface AssistantReply {
@@ -257,7 +258,7 @@ const LANGUAGES: { code: string; label: string }[] = [
 const SUGGESTIONS = [
   'Top risks today',
   'UP vs AP rice lending?',
-  'Summarise alerts',
+  'Build me a portfolio report',
   'Portfolio summary',
   'How is the score calculated?',
 ];
@@ -480,6 +481,7 @@ export function ChatBot({
     action?: AssistantAction;
     map?: ChatMapPoint[];
     scoreMsmeId?: string;
+    report?: { url: string; filename: string };
   }) => {
     setMessages((m) => [...m, { id: nextId.current++, role: 'assistant', ...msg }]);
     if (ttsEnabled) window.setTimeout(() => speak(msg.text), 50);
@@ -564,7 +566,7 @@ export function ChatBot({
     ];
 
     const controller = new AbortController();
-    window.setTimeout(() => controller.abort(), 15000);
+    window.setTimeout(() => controller.abort(), 90000);
 
     fetch('/api/chat', {
       method: 'POST',
@@ -579,6 +581,7 @@ export function ChatBot({
           action?: { tab: TabType; borrowerMsmeId?: string; label?: string };
           map?: ChatMapPoint[];
           scoreMsmeId?: string;
+          report?: { url: string; filename: string };
         };
         if (!data.text) throw new Error('llm-empty');
         let action: AssistantAction | undefined;
@@ -601,6 +604,7 @@ export function ChatBot({
           action,
           map: data.map && data.map.length >= 2 ? data.map : undefined,
           scoreMsmeId,
+          report: data.report,
         });
         setThinking(false);
       })
@@ -737,6 +741,18 @@ export function ChatBot({
                   const b = ALL_BORROWERS.find((x) => x.msmeId === m.scoreMsmeId);
                   return b ? <ScoreAnalysisCard b={b} /> : null;
                 })()}
+
+                {m.role === 'assistant' && m.report && (
+                  <a
+                    href={m.report.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1.5 w-fit text-[11px] font-semibold text-white bg-[#e11d48] rounded-full px-3.5 py-2 hover:bg-[#be123c] transition-colors shadow-sm"
+                  >
+                    <span className="material-symbols-outlined text-[15px]">picture_as_pdf</span>
+                    <span>Download PDF Report</span>
+                  </a>
+                )}
 
                 {m.action && (
                   <button
