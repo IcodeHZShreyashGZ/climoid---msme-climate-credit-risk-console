@@ -12,6 +12,7 @@ export function SideNavBar({ activeTab, onTabChange, alertCount = 31 }: SideNavB
     { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
     { id: 'map', label: 'Map Explorer', icon: 'map', live: true },
     { id: 'borrowers', label: 'Borrowers', icon: 'business_center' },
+    { id: 'compare', label: 'Compare MSMEs', icon: 'compare_arrows' },
     { id: 'alerts', label: 'Alerts', icon: 'notifications_active', badge: alertCount },
     { id: 'scenarios', label: 'Scenarios', icon: 'tune' },
     { id: 'portfolio', label: 'Portfolio', icon: 'pie_chart' },

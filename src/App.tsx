@@ -4,7 +4,9 @@ import { PRIMARY_BORROWER, TOP_AT_RISK_BORROWERS } from './data/mockData';
 import { SideNavBar } from './components/SideNavBar';
 import { TopNavBar } from './components/TopNavBar';
 import { ExportRiskPackModal, BulkNotifyModal } from './components/Modals';
+import { ChatBot } from './components/ChatBot';
 import { BorrowerConsoleView } from './views/BorrowerConsoleView';
+import { CompareView } from './views/CompareView';
 import { MapExplorerView } from './views/MapExplorerView';
 import { DashboardView } from './views/DashboardView';
 import { AlertsKanbanView } from './views/AlertsKanbanView';
@@ -144,6 +146,10 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'compare' && (
+            <CompareView onOpenBorrower={handleOpenUnderwriting} />
+          )}
+
           {activeTab === 'alerts' && (
             <AlertsKanbanView
               onOpenBulkNotify={() => setBulkNotifyModalOpen(true)}
@@ -188,6 +194,15 @@ export default function App() {
           {activeTab === 'settings' && <SettingsView />}
         </main>
       )}
+
+      {/* Floating Risk Assistant */}
+      <ChatBot
+        onNavigate={(tab) => setActiveTab(tab)}
+        onSelectBorrower={(borrower) => {
+          setCurrentBorrower(borrower);
+          setActiveTab('borrowers');
+        }}
+      />
 
       {/* Global Interactive Modals */}
       <ExportRiskPackModal

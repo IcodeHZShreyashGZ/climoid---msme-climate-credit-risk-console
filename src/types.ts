@@ -1,11 +1,12 @@
-export type TabType = 
-  | 'dashboard' 
-  | 'map' 
-  | 'borrowers' 
-  | 'alerts' 
-  | 'scenarios' 
-  | 'portfolio' 
-  | 'reports' 
+export type TabType =
+  | 'dashboard'
+  | 'map'
+  | 'borrowers'
+  | 'compare'
+  | 'alerts'
+  | 'scenarios'
+  | 'portfolio'
+  | 'reports'
   | 'settings'
   | 'landing';
 
